@@ -16,6 +16,7 @@
 */
 
 #include <M5Unified.h>
+#include "config.h"
 #include <WiFi.h>
 
 // Webサーバー関連
@@ -38,11 +39,6 @@ WiFiClient client;
 #include "BP35A1.h"
 BP35A1 *bp35a1;
 
-// NTP/RTC関連
-const char* TIME_ZONE = "JST-9";
-const char* NTP_SERVER1 = "ntp.nict.jp";
-const char* NTP_SERVER2 = "ntp.jst.mfeed.ad.jp";
-
 // ウォッチドックタイマー
 #define WDT_TIMER_SETUP 5*60  // setup()でのタイムアウト [sec] 5分
 #define WDT_TIMER_LOOP  5*60  // loop()でのタイムアウト  [sec] 5分
@@ -55,6 +51,7 @@ hw_timer_t *wdtimer0 = NULL;
 // グローバル変数
 int stickc = -1;   // -1=不明 0=無印 1=Plus 2=Plus2
 uint32_t watt = 0;
+uint32_t lastUpdate = 0;
 String measureDate = "";
 
 //----------------------------------------------------------------------
@@ -118,29 +115,25 @@ void lcdViewResult(bool res, String passstr, String failstr, uint16_t passwait=0
 
 // LCDにインジケーターを表示する
 void lcdIndicator(int lv) {
-  static uint16_t old = TFT_WHITE;
-  uint16_t cols[4] = { TFT_BLACK, TFT_GREEN, TFT_YELLOW, TFT_RED };
+  uint16_t cols[4] = { TFT_BLACK, TFT_YELLOW, TFT_GREEN, TFT_RED };
   uint16_t col = cols[lv];
   uint16_t x = M5.Lcd.width() - 5;
-  if (col != old) {
-    M5.Lcd.fillCircle(x,5, 4, col);
-    old = col;
-  }
+  M5.Lcd.fillCircle(x,5, 4, col);
 }
 
-// RTCから日時情報を取得する
-String zero(int num) {
-  String str = (num < 10) ? "0" : "";
-  str = str + String(num);
-  return str;
+// 経過時間を文字列で返す
+String ago2Str(uint32_t lastms) {
+  uint32_t ss = (millis() - lastms) / 1000;
+  char buff[11];
+  String str = "";
+  uint32_t hh = ss / 3600;
+  ss -= hh * 3600;
+  uint32_t mm = ss / 60;
+  ss -= mm * 60;
+  sprintf(buff, "%02d:%02d:%02d", hh, mm, ss);
+  return String(buff);
 }
-String getRtcDatetime() {
-  auto dt = M5.Rtc.getDateTime();
-  String str = zero(dt.date.year) +"-"+ zero(dt.date.month) +"-"+ zero(dt.date.date) +" ";
-  str = str + zero(dt.time.hours) +":"+ zero(dt.time.minutes) +":"+ zero(dt.time.seconds);
-  return str;
-}
-  
+
 // システムを再起動する
 void IRAM_ATTR wdt_reboot() {
   Serial.println("\n*** REBOOOOOOT!!");
@@ -194,7 +187,7 @@ bool getRemoteApiStatus() {
   DynamicJsonDocument json(128);
   bool res = false;
 
-  String url = "http://"+String(HOST_NAME)+".local/api/status?key="+API_KEY;
+  String url = "http://"+String(HOST_NAME)+".local/api/status?key="+String(API_KEY);
   http.setTimeout(15000);
   http.begin(client, url);
   auto code = http.GET();
@@ -268,13 +261,6 @@ void setup() {
 
   // 親機モードのセットアップ
   if (SEVERMODE) {
-    // NTPサーバーから日付データを取得し、RTCに保存する
-    M5.Lcd.print("NTP/RTC..");
-    configTzTime(TIME_ZONE, NTP_SERVER1, NTP_SERVER2);
-    String datestr = getRtcDatetime();
-    Serial.println("Save time to RTC. " + datestr);
-    M5.Lcd.println(datestr);
-
     // mDNSにホスト名を登録する
     M5.Lcd.print("mDNS Regist..");
     res = mdnsRegister(HOST_NAME);
@@ -356,6 +342,9 @@ void setup() {
         if (! res) break;
       }
       if (! res) continue;
+      // 自動測定のタスクを開始する
+      bp35a1->debugLevel = 0x0002;    // ログレベル bit2=測定結果のみ出力
+      bp35a1->startAutoMeasure();
       M5.Lcd.println("ALL OK!\nPlease wait..");
       delay(1000);
       break;
@@ -372,6 +361,7 @@ void setup() {
   wdt_clear();
   timerAlarmWrite(wdtimer0, WDT_TIMER_LOOP*1000000, false); //set time in us
 
+  lastUpdate = millis();
   M5.Lcd.setTextScroll(false);
 }
 
@@ -387,11 +377,19 @@ void loop() {
   float scale = 1.0;
   bool refresh = false;
   bool success = false;
-  static unsigned long lastUpdate = 0;
+  bool execok = false;
   static uint16_t wattall = 0;
   static uint16_t wattmax = 0;
   static int wattcnt = 0;
-  static int ngcnt = 0;
+  static int indicator = 0;
+  static int oldstat = -1;
+
+  // 5秒ごとに立つフラグ
+  static unsigned long tm = 0;
+  if (tm < millis()) {
+    execok = true;
+    tm = millis() + MEASURE_TIME + random(100, 500);
+  }
 
   // Aボタン1秒長押しでリセット
   if (M5.BtnA.pressedFor(1000)) {
@@ -402,50 +400,46 @@ void loop() {
     wdt_reboot();
   }
 
-  // 瞬時電力を取得（5秒に1回実行）
-  static unsigned long tm = 0;
-  if (tm < millis()) {
-    lcdIndicator(1);
-    if (SEVERMODE) {
-      // 親機
-      if (! debug) {
-        if (bp35a1->getInstantaneousPower(&watt) == true) {
-          Serial.println("getInstantaneousPower success");
-          M5.Lcd.println("IPMV: " + String(watt, DEC) + " [W]");
-          measureDate = getRtcDatetime();
-          lastUpdate = millis();
-          success = true;
-          ngcnt = 0;
-        } else {
-          Serial.println("getInstantaneousPower failed");
-          ngcnt++;
-        }
-        if (ngcnt >= 30) {  // 30回以上連続で取得に失敗したらリセットする
-          Serial.println("Something is wrong");
-          delay(1000);
-          wdt_reboot();
-        }
-      } else {
-        measureDate = getRtcDatetime();
-      }
-    } else {
-      // 子機
-      if (!debug && getRemoteApiStatus()) {
+  // 親機：瞬時電力を取得（データがあるときしか処理しない＝実質5秒おき）
+  if (SEVERMODE) {
+    if (! debug) {
+      if (bp35a1->getMeasuredData(&watt) == true) {
         lastUpdate = millis();
         success = true;
+        refresh = true;
+      }
+      if (millis() - lastUpdate > 10*60*1000) {  // 10分以上データが受信されなかったらリセットする
+        Serial.println("Something is wrong");
+        delay(1000);
+        wdt_reboot();
       }
     }
-    tm = millis() + MEASURE_TIME;
-    if (! SEVERMODE) tm += random(500, 1000);
-    refresh = true;
-    if (success) {
-      lcdIndicator(2);
-    } else {
-      lcdIndicator(3);
-      delay(500);
+    if (! success && execok) {
+      refresh = true;
+    } 
+  }
+  measureDate = ago2Str(lastUpdate)+" ago";
+
+  // 子機：瞬時電力を取得（5秒に1回実行）
+  if (!SEVERMODE) {
+    if (execok) {
+      lcdIndicator(1);
+      if (!debug && getRemoteApiStatus()) {
+        //lastUpdate = millis();
+        success = true;
+        refresh = true;
+      }
+      lcdIndicator(0);
     }
-  } else {
-    lcdIndicator(0);
+  }
+
+  // 親機：ステータスの変化をインジケーターに表示
+  if (SEVERMODE) {
+    if (bp35a1->stat != oldstat) {
+      indicator = bp35a1->stat;
+      oldstat = indicator;
+      refresh = true;
+    }
   }
 
   // 座標
@@ -467,6 +461,7 @@ void loop() {
   if (refresh) {
     M5.Lcd.clear(TFT_BLACK);
     M5.Lcd.setTextColor(TFT_WHITE);
+    if (SEVERMODE) lcdIndicator(indicator);
     // 測定時刻
     M5.Lcd.setTextSize(1);
     M5.Lcd.drawString(measureDate, 5, 2, &fonts::Font0);
