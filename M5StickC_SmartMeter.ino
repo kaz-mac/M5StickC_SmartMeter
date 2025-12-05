@@ -2,7 +2,7 @@
   M5StickC_SmartMeter.ino
   スマートメーター電力表示 for M5StickC series
 
-  Copyright (c) 2023 Kaz  (https://akibabara.com/blog/)
+  Copyright (c) 2025 Kaz  (https://akibabara.com/blog/)
   Released under the MIT license.
   see https://opensource.org/licenses/MIT
 
@@ -143,7 +143,8 @@ void IRAM_ATTR wdt_reboot() {
 
 // WDTのカウンターをクリアする
 void wdt_clear() {
-  timerWrite(wdtimer0, 0);
+  // timerWrite(wdtimer0, 0);
+  timerRestart(wdtimer0);
 }
 
 //----------------------------------------------------------------------
@@ -249,10 +250,13 @@ void setup() {
   Serial.println("System Start!");
 
   // ウォッチドックタイマー setup()用
-  wdtimer0 = timerBegin(0, 80, true);
-  timerAttachInterrupt(wdtimer0, &wdt_reboot, true);
-  timerAlarmWrite(wdtimer0, WDT_TIMER_SETUP*1000000, false);
-  timerAlarmEnable(wdtimer0);
+  // wdtimer0 = timerBegin(0, 80, true);
+  // timerAttachInterrupt(wdtimer0, &wdt_reboot, true);
+  // timerAlarmWrite(wdtimer0, WDT_TIMER_SETUP*1000000, false);
+  // timerAlarmEnable(wdtimer0);
+  wdtimer0 = timerBegin(1000000);  // 80MHz / 80 = 1MHz = 1000000 Hz
+  timerAttachInterrupt(wdtimer0, &wdt_reboot);
+  timerAlarm(wdtimer0, WDT_TIMER_SETUP*1000000, false, 0);
 
   // Wi-Fi接続
   M5.Lcd.print("Wi-Fi..");
@@ -359,7 +363,8 @@ void setup() {
 
   // ウォッチドックタイマー設定 loop()用
   wdt_clear();
-  timerAlarmWrite(wdtimer0, WDT_TIMER_LOOP*1000000, false); //set time in us
+  // timerAlarmWrite(wdtimer0, WDT_TIMER_LOOP*1000000, false); //set time in us
+  timerAlarm(wdtimer0, WDT_TIMER_LOOP*1000000, false, 0); //set time in us
 
   lastUpdate = millis();
   M5.Lcd.setTextScroll(false);
