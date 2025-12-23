@@ -383,8 +383,8 @@ void loop() {
   bool refresh = false;
   bool success = false;
   bool execok = false;
-  static uint16_t wattall = 0;
-  static uint16_t wattmax = 0;
+  static uint32_t wattall = 0;
+  static uint32_t wattmax = 0;
   static int wattcnt = 0;
   static int indicator = 0;
   static int oldstat = -1;
@@ -496,11 +496,11 @@ void loop() {
     if (watt > wattmax) wattmax = watt;
     wattcnt++;
     if (tm2 < millis() && wattcnt > 10) {
-      uint16_t wattav = wattall / wattcnt;  // 5分間の平均値
+      uint32_t wattav = wattall / wattcnt;  // 5分間の平均値
       if (wattav > 0 && wattmax > 0) {
         Serial.println("Send to Ambient Ave:"+String(wattav)+" W, Max:"+String(wattmax)+" W");
-        ambient.set(1, wattav);    
-        ambient.set(2, wattmax);
+        ambient.set(1, (int)wattav);    
+        ambient.set(2, (int)wattmax);
         ambient.send();   // Ambientに送信
       }
       wattall = 0;
